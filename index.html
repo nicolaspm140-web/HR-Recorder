@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HR Recorder</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #16181d; --muted: #6b7280; --line: #e3e6eb;
+    --accent: #2563eb; --rec: #dc2626; --ok: #16a34a; --warn: #d97706;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1115; --card: #181b21; --text: #eceff4; --muted: #9aa3b2; --line: #2a2f38;
+            --accent: #60a5fa; --rec: #f87171; --ok: #4ade80; --warn: #fbbf24; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         padding: max(16px, env(safe-area-inset-top)) 16px 32px; }
+  main { max-width: 520px; margin: 0 auto; display: grid; gap: 14px; }
+  h1 { font-size: 20px; margin: 4px 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  input { width: 100%; font-size: 18px; padding: 10px 12px; border-radius: 10px;
+          border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 12px 14px;
+           background: var(--accent); color: #fff; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  button.danger { background: transparent; color: var(--rec); border: 1px solid var(--line); }
+  button:disabled { opacity: .4; cursor: default; }
+  .row { display: flex; gap: 10px; align-items: center; }
+  .row > * { flex: 1; }
+  .big { font-size: 20px; padding: 16px; }
+  #startBtn { background: var(--ok); }
+  #stopBtn { background: var(--rec); }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.rec { background: var(--rec); animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .3; } }
+  .bpm { font-size: 64px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+  .bpm small { font-size: 18px; color: var(--muted); font-weight: 500; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+  .stats b { display: block; font-size: 18px; color: var(--text); font-variant-numeric: tabular-nums; }
+  .session { border-top: 1px solid var(--line); padding: 10px 0; }
+  .session:first-child { border-top: 0; }
+  .session .meta { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+  .session .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .session .actions button { padding: 8px 10px; font-size: 14px; }
+  .msg { font-size: 13px; color: var(--muted); white-space: pre-wrap; }
+  .error { color: var(--rec); }
+  .empty { color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>HR Recorder</h1>
+
+  <section class="card">
+    <label for="participant">Participant code</label>
+    <input id="participant" autocomplete="off" autocapitalize="characters" placeholder="e.g. P01">
+  </section>
+
+  <section class="card">
+    <div class="row">
+      <button id="connectBtn">Connect watch</button>
+      <button id="disconnectBtn" class="secondary" disabled>Disconnect</button>
+    </div>
+    <div class="status" style="margin-top:10px"><span id="connDot" class="dot"></span><span id="connText">Not connected</span></div>
+  </section>
+
+  <section class="card">
+    <div class="bpm"><span id="bpm">--</span> <small>bpm</small></div>
+    <div class="stats">
+      <div>Elapsed<b id="elapsed">00:00</b></div>
+      <div>Samples<b id="count">0</b></div>
+      <div>Last sample<b id="age">--</b></div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button id="startBtn" class="big" disabled>Start</button>
+      <button id="stopBtn" class="big" disabled>Stop</button>
+    </div>
+    <div class="status" style="margin-top:10px"><span id="recDot" class="dot"></span><span id="recText">Idle</span></div>
+  </section>
+
+  <section class="card">
+    <h2 style="font-size:16px;margin:0 0 6px">Recordings (saved on this phone)</h2>
+    <div id="sessions"></div>
+  </section>
+
+  <div id="msg" class="msg"></div>
+</main>
+
+<script>
+'use strict';
+
+const HR_SERVICE = 'heart_rate';
+const HR_MEASUREMENT = 'heart_rate_measurement';
+const STALE_MS = 5000;
+const DEMO = new URLSearchParams(location.search).has('demo');
+
+const $ = id => document.getElementById(id);
+const ui = {
+  participant: $('participant'), connectBtn: $('connectBtn'), disconnectBtn: $('disconnectBtn'),
+  connDot: $('connDot'), connText: $('connText'), bpm: $('bpm'), elapsed: $('elapsed'),
+  count: $('count'), age: $('age'), startBtn: $('startBtn'), stopBtn: $('stopBtn'),
+  recDot: $('recDot'), recText: $('recText'), sessions: $('sessions'), msg: $('msg'),
+};
+
+const state = {
+  device: null,        // BluetoothDevice (or demo stand-in)
+  connected: false,
+  userDisconnect: false,
+  lastSampleMs: 0,
+  session: null,       // { id, participant, startMs, count }
+  wakeLock: null,
+};
+
+function log(text, isError) {
+  const line = `[${new Date().toLocaleTimeString()}] ${text}`;
+  ui.msg.textContent = line + '\n' + ui.msg.textContent.split('\n').slice(0, 8).join('\n');
+  ui.msg.classList.toggle('error', !!isError);
+  (isError ? console.error : console.log)(text);
+}
+
+// ---------- Storage (IndexedDB): every sample is written as it arrives ----------
+
+let dbPromise;
+function db() {
+  dbPromise ??= new Promise((resolve, reject) => {
+    const req = indexedDB.open('hr-recorder', 1);
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      d.createObjectStore('sessions', { keyPath: 'id', autoIncrement: true });
+      d.createObjectStore('samples', { autoIncrement: true }).createIndex('session', 'session');
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return dbPromise;
+}
+
+async function tx(stores, mode, fn) {
+  const d = await db();
+  return new Promise((resolve, reject) => {
+    const t = d.transaction(stores, mode);
+    let result;
+    Promise.resolve(fn(t)).then(r => { result = r; });
+    t.oncomplete = () => resolve(result);
+    t.onerror = () => reject(t.error);
+    t.onabort = () => reject(t.error);
+  });
+}
+
+const reqP = req => new Promise((resolve, reject) => {
+  req.onsuccess = () => resolve(req.result);
+  req.onerror = () => reject(req.error);
+});
+
+const putSession = s => tx('sessions', 'readwrite', t => reqP(t.objectStore('sessions').put(s)));
+const addSample = s => tx('samples', 'readwrite', t => { t.objectStore('samples').add(s); });
+const allSessions = () => tx('sessions', 'readonly', t => reqP(t.objectStore('sessions').getAll()));
+const samplesFor = id => tx('samples', 'readonly', t => reqP(t.objectStore('samples').index('session').getAll(id)));
+const countFor = id => tx('samples', 'readonly', t => reqP(t.objectStore('samples').index('session').count(id)));
+
+async function deleteSession(id) {
+  await tx(['sessions', 'samples'], 'readwrite', async t => {
+    t.objectStore('sessions').delete(id);
+    const keys = await reqP(t.objectStore('samples').index('session').getAllKeys(id));
+    keys.forEach(k => t.objectStore('samples').delete(k));
+  });
+}
+
+// ---------- Heart Rate Measurement parsing (Bluetooth SIG 0x2A37) ----------
+
+function parseHeartRate(view) {
+  const flags = view.getUint8(0);
+  let i = 1;
+  const bpm = (flags & 0x01) ? view.getUint16(i, true) : view.getUint8(i);
+  i += (flags & 0x01) ? 2 : 1;
+  const contactSupported = !!(flags & 0x04);
+  const contact = contactSupported ? !!(flags & 0x02) : null;
+  if (flags & 0x08) i += 2; // energy expended, not used
+  const rr = [];
+  if (flags & 0x10) {
+    for (; i + 1 < view.byteLength; i += 2) rr.push(Math.round(view.getUint16(i, true) * 1000 / 1024));
+  }
+  return { bpm, contact, rr };
+}
+
+function onMeasurement(view) {
+  const t = Date.now();
+  const m = parseHeartRate(view);
+  state.lastSampleMs = t;
+  ui.bpm.textContent = m.bpm;
+  if (!state.session) return;
+  state.session.count++;
+  ui.count.textContent = state.session.count;
+  addSample({
+    session: state.session.id, t, bpm: m.bpm, rr: m.rr,
+    contact: m.contact,
+  }).catch(e => log('Failed to save sample: ' + e.message, true));
+}
+
+// ---------- Bluetooth connection ----------
+
+async function connect() {
+  if (DEMO) return connectDemo();
+  if (!navigator.bluetooth) {
+    log('This browser has no Web Bluetooth. On iPhone open this page in the "Bluefy" browser app.', true);
+    return;
+  }
+  try {
+    const device = await navigator.bluetooth.requestDevice({ filters: [{ services: [HR_SERVICE] }] });
+    state.device = device;
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    await openGatt();
+  } catch (e) {
+    if (e.name !== 'NotFoundError') log('Connect failed: ' + e.message, true); // NotFoundError = picker cancelled
+  }
+}
+
+async function openGatt() {
+  const server = await state.device.gatt.connect();
+  const service = await server.getPrimaryService(HR_SERVICE);
+  const ch = await service.getCharacteristic(HR_MEASUREMENT);
+  ch.addEventListener('characteristicvaluechanged', e => onMeasurement(e.target.value));
+  await ch.startNotifications();
+  state.connected = true;
+  state.userDisconnect = false;
+  log('Connected to ' + (state.device.name || 'device'));
+  render();
+}
+
+async function onDisconnected() {
+  state.connected = false;
+  render();
+  if (state.userDisconnect) return;
+  log('Connection lost, reconnecting…', true);
+  for (let attempt = 1; !state.connected && !state.userDisconnect; attempt++) {
+    try {
+      await openGatt();
+      log(`Reconnected after ${attempt} attempt(s)`);
+    } catch (e) {
+      await new Promise(r => setTimeout(r, Math.min(1000 * attempt, 5000)));
+    }
+  }
+}
+
+function disconnect() {
+  state.userDisconnect = true;
+  if (DEMO) { clearInterval(state.device?.timer); state.connected = false; render(); return; }
+  state.device?.gatt?.connected && state.device.gatt.disconnect();
+  state.connected = false;
+  render();
+}
+
+// Simulated HR strap for trying the app without a watch: add ?demo to the URL.
+function connectDemo() {
+  let hr = 72;
+  const timer = setInterval(() => {
+    hr = Math.max(50, Math.min(180, hr + Math.round((Math.random() - 0.5) * 4)));
+    const buf = new DataView(new ArrayBuffer(4));
+    buf.setUint8(0, 0x10); buf.setUint8(1, hr); buf.setUint16(2, Math.round(60000 / hr * 1.024), true);
+    onMeasurement(buf);
+  }, 1000);
+  state.device = { name: 'Demo HR', timer };
+  state.connected = true;
+  state.userDisconnect = false;
+  log('Demo device connected');
+  render();
+}
+
+// ---------- Recording ----------
+
+async function start() {
+  const participant = ui.participant.value.trim();
+  if (!participant) { log('Enter a participant code first.', true); ui.participant.focus(); return; }
+  localStorage.setItem('participant', participant);
+  const s = { participant, startMs: Date.now(), endMs: null, deviceName: state.device?.name || '' };
+  s.id = await putSession(s);
+  state.session = { ...s, count: 0 };
+  ui.count.textContent = '0';
+  requestWakeLock();
+  log(`Recording started for ${participant}`);
+  render();
+}
+
+async function stop() {
+  const s = state.session;
+  if (!s) return;
+  state.session = null;
+  await putSession({ id: s.id, participant: s.participant, startMs: s.startMs, endMs: Date.now(), deviceName: s.deviceName });
+  releaseWakeLock();
+  log(`Recording stopped: ${s.count} samples saved`);
+  render();
+  renderSessions();
+}
+
+async function requestWakeLock() {
+  try { state.wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* not supported */ }
+}
+function releaseWakeLock() { state.wakeLock?.release().catch(() => {}); state.wakeLock = null; }
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && state.session) requestWakeLock();
+});
+
+// ---------- Export ----------
+
+const pad = n => String(n).padStart(2, '0');
+const stamp = ms => { const d = new Date(ms); return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`; };
+const csvField = v => /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+
+async function buildCsv(session) {
+  const rows = await samplesFor(session.id);
+  rows.sort((a, b) => a.t - b.t);
+  const lines = ['timestamp_iso,unix_ms,elapsed_s,participant,bpm,rr_ms,sensor_contact'];
+  for (const r of rows) {
+    lines.push([
+      new Date(r.t).toISOString(), r.t, ((r.t - session.startMs) / 1000).toFixed(3),
+      csvField(session.participant), r.bpm, r.rr.join(' '),
+      r.contact === null ? '' : (r.contact ? 1 : 0),
+    ].join(','));
+  }
+  const name = `${session.participant.replace(/[^\w.-]+/g, '_')}_${stamp(session.startMs)}.csv`;
+  return { name, text: lines.join('\r\n') + '\r\n' };
+}
+
+async function shareCsv(session) {
+  const { name, text } = await buildCsv(session);
+  const file = new File([text], name, { type: 'text/csv' });
+  if (navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: name }); return; }
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  log('Share sheet not available in this browser; use Download or Copy.', true);
+}
+
+async function downloadCsv(session) {
+  const { name, text } = await buildCsv(session);
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
+  const a = Object.assign(document.createElement('a'), { href: url, download: name });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+async function copyCsv(session) {
+  const { name, text } = await buildCsv(session);
+  try { await navigator.clipboard.writeText(text); log(`Copied ${name} to clipboard; paste it into an email or note.`); }
+  catch { log('Clipboard not available in this browser.', true); }
+}
+
+// ---------- Rendering ----------
+
+const fmtDur = ms => { const s = Math.max(0, Math.round(ms / 1000)); return `${pad(Math.floor(s / 60))}:${pad(s % 60)}`; };
+
+function render() {
+  const rec = !!state.session;
+  ui.connectBtn.disabled = state.connected;
+  ui.disconnectBtn.disabled = !state.connected && !state.device;
+  ui.startBtn.disabled = !state.connected || rec;
+  ui.stopBtn.disabled = !rec;
+  ui.participant.disabled = rec;
+  ui.connDot.className = 'dot ' + (state.connected ? 'ok' : (state.device && !state.userDisconnect ? 'warn' : ''));
+  ui.connText.textContent = state.connected ? `Connected: ${state.device?.name || 'device'}`
+    : (state.device && !state.userDisconnect ? 'Reconnecting…' : 'Not connected');
+  ui.recDot.className = 'dot ' + (rec ? 'rec' : '');
+  ui.recText.textContent = rec ? `Recording ${state.session.participant}` : 'Idle';
+}
+
+function tick() {
+  if (state.session) ui.elapsed.textContent = fmtDur(Date.now() - state.session.startMs);
+  if (state.lastSampleMs) {
+    const age = Date.now() - state.lastSampleMs;
+    ui.age.textContent = (age / 1000).toFixed(0) + ' s ago';
+    ui.age.style.color = age > STALE_MS ? 'var(--rec)' : '';
+  }
+}
+setInterval(tick, 500);
+
+async function renderSessions() {
+  const sessions = (await allSessions()).sort((a, b) => b.startMs - a.startMs);
+  ui.sessions.replaceChildren();
+  if (!sessions.length) {
+    ui.sessions.innerHTML = '<div class="empty">No recordings yet.</div>';
+    return;
+  }
+  for (const s of sessions) {
+    const live = state.session?.id === s.id;
+    const n = live ? state.session.count : await countFor(s.id);
+    const el = document.createElement('div');
+    el.className = 'session';
+    const end = s.endMs ? fmtDur(s.endMs - s.startMs) : (live ? 'recording…' : 'interrupted (data kept)');
+    el.innerHTML = `<div><b></b></div><div class="meta"></div><div class="actions"></div>`;
+    el.querySelector('b').textContent = s.participant;
+    el.querySelector('.meta').textContent = `${new Date(s.startMs).toLocaleString()} · ${end} · ${n} samples`;
+    const actions = el.querySelector('.actions');
+    const add = (label, cls, fn) => {
+      const b = document.createElement('button');
+      b.textContent = label; b.className = cls; b.disabled = live;
+      b.onclick = () => fn(s).catch(e => log(e.message, true));
+      actions.append(b);
+    };
+    add('Share CSV', '', shareCsv);
+    add('Download', 'secondary', downloadCsv);
+    add('Copy', 'secondary', copyCsv);
+    add('Delete', 'danger', async s => {
+      if (!confirm(`Delete recording ${s.participant} (${new Date(s.startMs).toLocaleString()})?`)) return;
+      await deleteSession(s.id);
+      renderSessions();
+    });
+    ui.sessions.append(el);
+  }
+}
+
+// ---------- Wiring ----------
+
+ui.participant.value = localStorage.getItem('participant') || '';
+ui.connectBtn.onclick = connect;
+ui.disconnectBtn.onclick = disconnect;
+ui.startBtn.onclick = () => start().then(renderSessions).catch(e => log(e.message, true));
+ui.stopBtn.onclick = () => stop().catch(e => log(e.message, true));
+window.addEventListener('beforeunload', e => { if (state.session) { e.preventDefault(); e.returnValue = ''; } });
+
+if (DEMO) log('Demo mode: "Connect watch" uses a simulated heart rate.');
+else if (!navigator.bluetooth) log('Web Bluetooth not available here. On iPhone, open this page in the "Bluefy" app.', true);
+render();
+renderSessions().catch(e => log('Storage error: ' + e.message, true));
+</script>
+</body>
+</html>
